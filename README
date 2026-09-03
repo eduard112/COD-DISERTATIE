@@ -1,0 +1,52 @@
+# Algoritmi de optimizare a antenelor de radiofrecvență
+
+Codul utilizat în cadrul lucrării de disertație cu același titlu. Cuprinde programele de optimizare pentru cele patru studii de caz, scripturile analizelor de sensibilitate și de robustețe, precum și cele de generare a figurilor.
+
+## Cerințe
+
+- MATLAB R2024a sau ulterior
+- Antenna Toolbox
+- Global Optimization Toolbox
+- Parallel Computing Toolbox (numai pentru studiul de caz 1)
+
+## Structura
+
+```
+optimizare/          programele de optimizare, câte unul per studiu de caz
+analize/             sensibilitate și robustețe
+figuri/              generarea figurilor din fișierele de rezultate
+rezultate/           fișierele .mat produse de rulări
+```
+
+## Studiile de caz
+
+| Program | Antena | Algoritm | Buget |
+|---|---|---|---|
+| `optimizare_ga_patch.m` | microstrip, 2,16 GHz | genetic | 20 indivizi × 25 generații |
+| `optimizare_ga_patch_continuare.m` | idem, etapa a doua | genetic | +30 generații |
+| `optimizare_sadea_yagi.m` | Yagi-Uda, 144,5 MHz | SADEA | 200 iterații |
+| `optimizare_yagi.m` | Yagi-Uda, 144,5 MHz | surogat / căutare directă | 1000, respectiv 2000 analize |
+
+Ultimul program cuprinde ambele metode; algoritmul se selectează dintr-un singur parametru de comutare aflat la începutul fișierului. Această construcție asigură identitatea integrală a celor două studii de caz, cerință a comparației.
+
+## Ordinea rulării
+
+1. **Optimizarea.** Se rulează programul dorit din `optimizare/`. Fiecare salvează un fișier `.mat` cu istoricul complet al căutării și cu soluția obținută.
+2. **Analiza de sensibilitate.** `analize/analiza_sensibilitate.m`, cu fișierul de rezultate indicat la începutul scriptului. Consumă 5n analize electromagnetice, unde n este numărul de variabile.
+3. **Analiza de robustețe.** `analize/analiza_robustete.m`, cu aceeași convenție. Consumă 200 de analize per soluție.
+4. **Figurile.** Scripturile din `figuri/` citesc fișierele `.mat` și produc imaginile în format PNG și EMF, fără a relua simulările.
+
+## Durate orientative
+
+Măsurate pe un sistem cu procesor AMD Ryzen 7 5800H și 16 GB memorie:
+
+- studiul de caz 1: aproximativ 12 ore, cumulat pe cele două etape
+- studiile de caz 2–4: între 28 și 53 de minute fiecare
+- analiza de sensibilitate: sub 2 minute per soluție
+- analiza de robustețe: 7–10 minute per soluție
+
+## Observații
+
+Analizele de robustețe inițializează generatorul de numere aleatoare cu o valoare fixă, astfel încât toate soluțiile primesc aceeași secvență de perturbații, iar rezultatele sunt reproductibile.
+
+Algoritmii stocastici produc însă rezultate diferite la execuții succesive ale optimizării propriu-zise. Fișierele din `rezultate/` conțin rulările pe baza cărora au fost redactate concluziile lucrării.
