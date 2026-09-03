@@ -1,0 +1,174 @@
+%% ANALIZA DE SENSIBILITATE A SOLUTIILOR OPTIMIZATE
+%
+%  Determina influenta fiecarui parametru geometric asupra performantelor
+%  antenei, prin variatia controlata a unui singur parametru la un moment
+%  dat, ceilalti fiind mentinuti la valorile optime.
+%
+%  Metodologia este descrisa in subcapitolul 2.5 al lucrarii.
+%  Durata estimata: 3-5 minute pentru o solutie.
+
+clear; clc; close all;
+
+set(0, 'DefaultFigureVisible', 'off');
+warningState = warning('off', 'all');
+
+%% ================== 1. SOLUTIA ANALIZATA ==================
+%  Se indica fisierul rezultat din optimizare. Scriptul se ruleaza separat
+%  pentru fiecare dintre solutiile obtinute.
+
+FISIER = 'surrogate_yagi_20260808_1446.mat';   % <<< se modifica dupa caz
+ETICHETA = 'metoda surogat';                   % <<< pentru titluri si fisiere
+
+fprintf('Analiza de sensibilitate: %s\n', ETICHETA);
+fprintf('Fisier: %s\n\n', FISIER);
+
+R = load(FISIER);
+P  = R.P;
+x0 = R.xOpt(:)';          % solutia optima
+et = R.etichete;
+
+nVar   = numel(x0);
+lambda = physconst('LightSpeed') / P.fc;
+
+%% ================== 2. PARAMETRII ANALIZEI ==================
+ABATERE   = 0.10;         % domeniul de variatie: +/- 10%
+NR_PUNCTE = 5;            % numar de puncte pe interval
+
+variatii = linspace(-ABATERE, ABATERE, NR_PUNCTE);
+
+fprintf('Variabile analizate: %d\n', nVar);
+fprintf('Domeniul de variatie: %+.0f%% ... %+.0f%% in %d puncte\n', ...
+        -100*ABATERE, 100*ABATERE, NR_PUNCTE);
+fprintf('Analize electromagnetice necesare: %d\n\n', nVar*NR_PUNCTE);
+
+%% ================== 3. VALORILE DE REFERINTA ==================
+[D0, FB0, S0] = evalueazaAntena(construiesteAntena(x0, P), P);
+fprintf('Solutia optima: D = %.2f dBi | FB = %.2f dB | S11 = %.2f dB\n\n', ...
+        D0, FB0, S0);
+
+%% ================== 4. BALEIAJUL PARAMETRILOR ==================
+D  = zeros(nVar, NR_PUNCTE);
+FB = zeros(nVar, NR_PUNCTE);
+S  = zeros(nVar, NR_PUNCTE);
+
+cron = tic;
+for i = 1:nVar
+    fprintf('  %2d/%2d  %-14s ', i, nVar, et{i});
+    for j = 1:NR_PUNCTE
+        x    = x0;
+        x(i) = x0(i) * (1 + variatii(j));
+        try
+            [D(i,j), FB(i,j), S(i,j)] = evalueazaAntena(construiesteAntena(x,P), P);
+        catch
+            D(i,j) = NaN; FB(i,j) = NaN; S(i,j) = NaN;
+        end
+        fprintf('.');
+    end
+    fprintf('  D: %.2f..%.2f\n', min(D(i,:)), max(D(i,:)));
+end
+durata = toc(cron);
+fprintf('\nDurata: %.1f minute\n\n', durata/60);
+
+%% ================== 5. INDICATORII DE SENSIBILITATE ==================
+%  Amplitudinea variatiei: diferenta dintre valoarea maxima si cea minima
+ampD  = max(D,[],2)  - min(D,[],2);
+ampFB = max(FB,[],2) - min(FB,[],2);
+ampS  = max(S,[],2)  - min(S,[],2);
+
+%  Sensibilitatea relativa, estimata prin diferente finite centrate
+%  in jurul punctului optim (punctul median al baleiajului)
+m  = ceil(NR_PUNCTE/2);
+dx = 2 * ABATERE;                       % variatia relativa intre punctele m-1 si m+1
+
+sensD  = ((D(:,m+1)  - D(:,m-1))  / dx) ./ D0;
+sensFB = ((FB(:,m+1) - FB(:,m-1)) / dx) ./ FB0;
+sensS  = ((S(:,m+1)  - S(:,m-1))  / dx) ./ abs(S0);
+
+%% ================== 6. TABELUL REZULTATELOR ==================
+fprintf('%-16s %10s %10s %10s %12s\n', ...
+        'Parametru', 'ampl. D', 'ampl. FB', 'ampl. S11', 'sens. rel. D');
+fprintf('%s\n', repmat('-', 1, 62));
+
+[~, ordine] = sort(ampD, 'descend');
+for k = ordine'
+    fprintf('%-16s %10.3f %10.3f %10.3f %12.3f\n', ...
+            et{k}, ampD(k), ampFB(k), ampS(k), sensD(k));
+end
+
+fprintf('\nParametrul cu influenta maxima asupra directivitatii: %s (%.3f dB)\n', ...
+        et{ordine(1)}, ampD(ordine(1)));
+[~, iFB] = max(ampFB);
+fprintf('Parametrul cu influenta maxima asupra raportului F/B:  %s (%.3f dB)\n', ...
+        et{iFB}, ampFB(iFB));
+[~, iS] = max(ampS);
+fprintf('Parametrul cu influenta maxima asupra adaptarii:       %s (%.3f dB)\n', ...
+        et{iS}, ampS(iS));
+
+%% ================== 7. SALVARE ==================
+numeFisier = sprintf('sensibilitate_%s.mat', ...
+                     regexprep(lower(ETICHETA), '\s+', '_'));
+save(numeFisier, 'D','FB','S','variatii','x0','et','P', ...
+     'ampD','ampFB','ampS','sensD','sensFB','sensS','D0','FB0','S0', ...
+     'ETICHETA','durata');
+fprintf('\nRezultate salvate in: %s\n', numeFisier);
+
+%% ================== 8. FIGURI ==================
+if ~(usejava('desktop') && feature('ShowFigureWindows'))
+    return
+end
+set(0, 'DefaultFigureVisible', 'on');
+warning(warningState);
+
+proc = 100 * variatii;
+
+figure('Name','Sensibilitate - directivitate','Position',[100 100 900 500]);
+plot(proc, D', '-o', 'LineWidth', 1.2); grid on;
+yline(D0, '--k', 'valoare optima');
+yline(P.Dmin, ':r', 'cerinta impusa');
+xlabel('Abaterea parametrului [%]'); ylabel('Directivitate [dBi]');
+title(['Sensibilitatea directivitatii - ' ETICHETA]);
+legend(et, 'Location','eastoutside', 'Interpreter','none');
+
+figure('Name','Sensibilitate - raport fata-spate','Position',[100 100 900 500]);
+plot(proc, FB', '-o', 'LineWidth', 1.2); grid on;
+yline(FB0, '--k', 'valoare optima');
+yline(P.FBmin, ':r', 'cerinta impusa');
+xlabel('Abaterea parametrului [%]'); ylabel('Raport fata-spate [dB]');
+title(['Sensibilitatea raportului fata-spate - ' ETICHETA]);
+legend(et, 'Location','eastoutside', 'Interpreter','none');
+
+figure('Name','Ierarhia parametrilor','Position',[100 100 800 450]);
+barh(categorical(et(ordine), et(ordine)), ampD(ordine)); grid on;
+xlabel('Amplitudinea variatiei directivitatii [dB]');
+title(['Ierarhia parametrilor dupa influenta - ' ETICHETA]);
+
+
+%% ============ FUNCTII AUXILIARE ============
+%  Identice celor utilizate in scripturile de optimizare, conform cerintei
+%  de coerenta formulate in sectiunea 2.2.3.
+
+function ant = construiesteAntena(x, P)
+    ant = yagiUda;
+    ant.NumDirectors     = P.nDirect;
+    ant.Exciter          = P.excitator;
+    ant.Exciter.Length   = x(P.iLexc);
+    ant.ReflectorLength  = x(P.iLref);
+    ant.ReflectorSpacing = x(P.iSref);
+    ant.DirectorLength   = x(P.iLdir);
+    ant.DirectorSpacing  = x(P.iSdir);
+end
+
+function [D, FB, S11max] = evalueazaAntena(ant, P)
+    delete(findall(0, 'Type', 'figure', 'Tag', 'TMWWaitbar'));
+
+    Dgrila = pattern(ant, P.fc, P.az, P.el);
+    [D, idx]   = max(Dgrila(:));
+    [iel, iaz] = ind2sub(size(Dgrila), idx);
+    azSpate = mod(P.az(iaz) + 360, 360) - 180;
+    elSpate = -P.el(iel);
+    FB = D - pattern(ant, P.fc, azSpate, elSpate);
+
+    Z      = impedance(ant, P.freqBanda);
+    Gamma  = (Z - P.Z0) ./ (Z + P.Z0);
+    S11max = max(20*log10(abs(Gamma)));
+end
