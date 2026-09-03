@@ -1,0 +1,309 @@
+%% OPTIMIZAREA UNEI ANTENE YAGI-UDA CU 6 ELEMENTE PRIN ALGORITMUL SADEA
+%
+%  OBSERVATIE METODOLOGICA IMPORTANTA
+%  Metoda optimize din Antenna Toolbox primeste limitele sub forma unui
+%  tablou de celule, fiecare element al proprietatilor vectoriale putand
+%  primi limite proprii. Rezulta 10 variabile de proiectare independente:
+%  lungimea si spatierea reflectorului, lungimile si spatierile celor patru
+%  directori. Spre deosebire de studiile de caz anterioare, lungimea
+%  excitatorului nu poate fi declarata ca variabila, fiind o proprietate a
+%  unui obiect imbricat. Configuratia difera prin urmare de cea cu 11
+%  variabile, iar rezultatele admit doar comparatie restransa, pe marimile
+%  invariante la scara, conform delimitarii din sectiunea 2.4.1.
+
+clear; clc; close all;
+
+%% ================== 0. CONFIGURARE GRAFICA ==================
+%  Functiile de analiza din Antenna Toolbox deschid bare de progres la
+%  fiecare apel. La un numar mare de evaluari succesive, aceasta operatie
+%  poate provoca blocarea procesului pe sisteme cu accelerare grafica
+%  limitata. Afisarea este dezactivata pe durata optimizarii si reactivata
+%  inainte de generarea figurilor finale.
+set(0, 'DefaultFigureVisible', 'off');
+warningState = warning('off', 'all');
+
+REGIM_TEST = false;       % true = 20 iteratii (proba), false = 200
+
+%% ================== 1. PARAMETRII PROBLEMEI ==================
+P.nDirect = 4;
+P.fc      = 144.5e6;
+P.Z0      = 200;
+P.banda   = 0.015;
+P.nFrecv  = 3;    % Numarul de frecvente la care se evalueaza adaptarea.
+                  % Fiecare punct de frecventa impune reconstruirea matricei
+                  % de impedante, conform observatiei din sectiunea 1.1.4,
+                  % fiind principalul consumator de timp al unei evaluari.
+                  % Reducerea de la 5 la 3 puncte pastreaza verificarea la
+                  % frecventa centrala si la marginile benzii, scurtand cu
+                  % aproximativ o treime durata unei analize.
+
+P.Dmin    = 10;
+P.FBmin   = 20;
+P.S11max  = -15;
+P.K       = 75;
+
+P.freqBanda = linspace((1-P.banda/2)*P.fc, (1+P.banda/2)*P.fc, P.nFrecv);
+P.az = -180:10:180;    % grila unghiulara pentru localizarea maximului
+P.el =  -90:10:90;     % diagramei de radiatie
+
+if REGIM_TEST, P.nIter = 20; else, P.nIter = 200; end
+
+%% ================== 2. ANTENA DE REFERINTA ==================
+fprintf('Se construieste antena de referinta...\n');
+yagidesign = design(yagiUda, P.fc);
+yagidesign.NumDirectors = P.nDirect;
+
+if numel(yagidesign.DirectorLength) ~= P.nDirect
+    yagidesign.DirectorLength = repmat(yagidesign.DirectorLength(1), 1, P.nDirect);
+end
+if numel(yagidesign.DirectorSpacing) ~= P.nDirect
+    yagidesign.DirectorSpacing = repmat(yagidesign.DirectorSpacing(1), 1, P.nDirect);
+end
+
+lambda = physconst('LightSpeed') / P.fc;
+fprintf('  Lungimea de unda: %.4f m\n', lambda);
+fprintf('  Directori: %d\n\n', yagidesign.NumDirectors);
+
+%% ================== 3. VARIABILE SI LIMITE ==================
+designVars = {'ReflectorLength','DirectorLength', ...
+              'ReflectorSpacing','DirectorSpacing'};
+
+% Limitele sunt identice cu cele utilizate in celelalte studii de caz,
+% exprimate in fractiuni de lungime de unda.
+% Formatul cerut este o matrice cu doua linii: prima contine limitele
+% inferioare, a doua limitele superioare, cate o coloana pentru fiecare
+% variabila de proiectare, in ordinea din designVars.
+%
+% Formatul argumentului de limite acceptat de functia optimize difera intre
+% versiuni. Se incearca succesiv variantele plauzibile, retinandu-se prima
+% care este acceptata.
+% Limitele lungimilor sunt raportate la lungimea elementului activ, care
+% ramane fixa. Functionarea antenei Yagi-Uda impune ca reflectorul sa fie
+% mai lung decat excitatorul, iar directorii mai scurti decat acesta,
+% conform principiului expus in sectiunea 1.2.2. Nerespectarea acestei
+% conditii genereaza configuratii fizic incoerente, respinse de rutina de
+% validare a geometriei.
+Lexc = yagidesign.Exciter.Length;
+fprintf('  Lungimea excitatorului: %.4f m (%.3f lambda)\n\n', Lexc, Lexc/lambda);
+
+lbVals = {1.03*Lexc, repmat(0.85*Lexc,1,P.nDirect), ...
+          0.10*lambda, repmat(0.15*lambda,1,P.nDirect)};
+ubVals = {1.20*Lexc, repmat(0.97*Lexc,1,P.nDirect), ...
+          0.30*lambda, repmat(0.45*lambda,1,P.nDirect)};
+
+formate = cell(1,3);
+% A: tablou de celule 2 x nProprietati, cu vectori pe fiecare proprietate
+formate{1} = [lbVals; ubVals];
+% B: tablou de celule 2 x nProprietati, cu cate o valoare scalara
+formate{2} = [ cellfun(@(v) v(1), lbVals, 'UniformOutput', false); ...
+               cellfun(@(v) v(1), ubVals, 'UniformOutput', false) ];
+% C: tablou de celule 1 x nProprietati, fiecare celula fiind o matrice 2 x N
+formate{3} = cellfun(@(a,b) [a; b], lbVals, ubVals, 'UniformOutput', false);
+
+fprintf('Limite de cautare:\n');
+for k = 1:numel(designVars)
+    fprintf('  %-18s [%.4f .. %.4f] m   [%.3f .. %.3f] lambda\n', ...
+            designVars{k}, lbVals{k}(1), ubVals{k}(1), ...
+            lbVals{k}(1)/lambda, ubVals{k}(1)/lambda);
+end
+
+% verificare: antena de referinta trebuie sa se afle in interiorul limitelor
+valInit = [yagidesign.ReflectorLength, yagidesign.DirectorLength(1), ...
+           yagidesign.ReflectorSpacing, yagidesign.DirectorSpacing(1)];
+for k = 1:numel(designVars)
+    if valInit(k) < lbVals{k}(1) || valInit(k) > ubVals{k}(1)
+        fprintf('  ATENTIE: %s initial (%.4f) este in afara limitelor.\n', ...
+                designVars{k}, valInit(k));
+    end
+end
+fprintf('\n');
+
+%% ================== 4. CONTORIZARE ==================
+global NR_EVAL ISTORIC GEOMETRII PARAM
+NR_EVAL   = 0;
+ISTORIC   = [];
+GEOMETRII = [];      % dimensiunile geometrice ale fiecarei solutii evaluate
+PARAM     = P;
+
+fcnObiectiv = @(ant) functieObiectivSADEA(ant);
+
+%% ================== 5. VERIFICARE PRELIMINARA ==================
+fprintf('Se evalueaza antena de referinta...\n');
+tic;
+F0 = fcnObiectiv(yagidesign);
+t1 = toc;
+[D0, FB0, S0] = evalueazaAntena(yagidesign, P);
+fprintf('  F  = %.4f   (durata: %.1f s)\n', F0, t1);
+fprintf('  D  = %.2f dBi   FB = %.2f dB   S11 = %.2f dB\n', D0, FB0, S0);
+fprintf('  Durata estimata: %.0f minute\n\n', P.nIter*t1*1.5/60);
+
+% se reseteaza contorul dupa verificare
+NR_EVAL = 0; ISTORIC = []; GEOMETRII = [];
+
+%% ================== 6. OPTIMIZAREA ==================
+fprintf('Se porneste SADEA (%d iteratii)...\n', P.nIter);
+cron = tic;
+
+optimdesign = [];
+for iFmt = 1:numel(formate)
+    LBUB = formate{iFmt};
+    try
+        fprintf('  Se incearca formatul %d al limitelor...\n', iFmt);
+        [optimdesign, optimizerData] = optimize(yagidesign, P.fc, fcnObiectiv, ...
+                                                designVars, LBUB, ...
+                                                Iterations = P.nIter);
+        fprintf('  Formatul %d a fost acceptat.\n', iFmt);
+        break
+    catch ME
+        fprintf('  Formatul %d respins: %s\n', iFmt, ME.message);
+    end
+end
+
+if isempty(optimdesign)
+    error(['Niciunul dintre formatele incercate nu a fost acceptat. ' ...
+           'Se recomanda consultarea documentatiei: doc optimize']);
+end
+
+durata = toc(cron);
+
+%% ================== 7. REZULTATE ==================
+[D, FB, S11max] = evalueazaAntena(optimdesign, P);
+fval = fcnObiectiv(optimdesign);
+
+fprintf('\n==================================================\n');
+fprintf('  REZULTATELE OPTIMIZARII (SADEA)\n');
+fprintf('==================================================\n');
+fprintf('Durata:              %.1f minute\n', durata/60);
+fprintf('Evaluari inregistrate: %d\n', NR_EVAL);
+fprintf('Valoarea finala:     %.4f\n\n', fval);
+
+fprintf('%-24s %10s %10s %8s\n', 'Marime', 'Initial', 'Optimizat', 'Prag');
+fprintf('%-24s %10.2f %10.2f %8.1f   %s\n', 'Directivitate [dBi]', ...
+        D0, D, P.Dmin, verdict(D > P.Dmin));
+fprintf('%-24s %10.2f %10.2f %8.1f   %s\n', 'Raport fata-spate [dB]', ...
+        FB0, FB, P.FBmin, verdict(FB > P.FBmin));
+fprintf('%-24s %10.2f %10.2f %8.1f   %s\n', 'S11 maxim [dB]', ...
+        S0, S11max, P.S11max, verdict(S11max < P.S11max));
+
+fprintf('\nDimensiuni optimizate (m):\n');
+fprintf('  ReflectorLength   %.4f  (initial %.4f)\n', ...
+        optimdesign.ReflectorLength, yagidesign.ReflectorLength);
+fprintf('  ReflectorSpacing  %.4f  (initial %.4f)\n', ...
+        optimdesign.ReflectorSpacing, yagidesign.ReflectorSpacing);
+fprintf('  DirectorLength    %s\n',  mat2str(round(optimdesign.DirectorLength,4)));
+fprintf('  DirectorSpacing   %s\n',  mat2str(round(optimdesign.DirectorSpacing,4)));
+
+%% ================== 8. SALVARE ==================
+numeFisier = sprintf('yagi_sadea_%s.mat', datestr(now,'yyyymmdd_HHMM'));
+save(numeFisier, 'optimdesign','optimizerData','yagidesign','P', ...
+                 'designVars','LBUB','D','FB','S11max','D0','FB0','S0', ...
+                 'fval','durata','NR_EVAL','ISTORIC','GEOMETRII','lambda');
+fprintf('\nRezultate salvate in: %s\n', numeFisier);
+
+%% ================== 9. FIGURI ==================
+%  Figurile se genereaza numai daca exista interfata grafica. La rularea in
+%  regim fara afisare, acestea se produc ulterior, pornind de la fisierul
+%  de rezultate salvat.
+areInterfata = usejava('desktop') && feature('ShowFigureWindows');
+
+if ~areInterfata
+    fprintf('\nRulare fara interfata grafica: figurile nu au fost generate.\n');
+    fprintf('Se pot obtine ulterior din fisierul %s\n', numeFisier);
+    return
+end
+
+set(0, 'DefaultFigureVisible', 'on');
+warning(warningState);
+
+figure('Name','Geometria optimizata'); show(optimdesign);
+figure('Name','Diagrama de radiatie'); pattern(optimdesign, P.fc);
+
+if ~isempty(ISTORIC)
+    figure('Name','Convergenta');
+    plot(ISTORIC(:,1), cummin(ISTORIC(:,2)), 'LineWidth', 1.5); grid on;
+    xlabel('Numar de analize electromagnetice');
+    ylabel('Cea mai buna valoare a functiei obiectiv');
+    title('SADEA - evolutia procesului de optimizare');
+end
+
+
+%% ============ FUNCTII AUXILIARE ============
+
+function [D, FB, S11max] = evalueazaAntena(ant, P)
+    Dgrila = pattern(ant, P.fc, P.az, P.el);
+    [D, idx]   = max(Dgrila(:));
+    [iel, iaz] = ind2sub(size(Dgrila), idx);
+    azSpate = mod(P.az(iaz) + 360, 360) - 180;
+    elSpate = -P.el(iel);
+    FB = D - pattern(ant, P.fc, azSpate, elSpate);
+
+    % Coeficientul de reflexie se calculeaza direct din impedanta de intrare.
+    % Pentru o antena cu un singur port, rezultatul este identic celui
+    % furnizat de functia sparameters, apelul fiind insa mai economic.
+    Z      = impedance(ant, P.freqBanda);
+    Gamma  = (Z - P.Z0) ./ (Z + P.Z0);
+    S11    = 20*log10(abs(Gamma));
+    S11max = max(S11);
+end
+
+function F = functieObiectivSADEA(ant)
+    % Functia primeste obiectul antena, nu un vector de variabile.
+    % Formularea penalizarii este identica celei din celelalte studii de caz.
+    global NR_EVAL ISTORIC GEOMETRII PARAM
+    NR_EVAL = NR_EVAL + 1;
+    P = PARAM;
+
+    % Functiile de analiza creeaza cate un obiect de tip bara de progres la
+    % fiecare apel. Acestea nu sunt intotdeauna eliberate, iar acumularea lor
+    % duce la blocarea subsistemului grafic dupa cateva zeci de evaluari.
+    % Stergerea explicita a obiectelor reziduale previne aceasta situatie.
+    delete(findall(0, 'Type', 'figure', 'Tag', 'TMWWaitbar'));
+
+    % se inregistreaza geometria evaluata, pentru a putea reconstrui
+    % solutia chiar si in cazul intreruperii rularii
+    geom = [ ant.ReflectorLength, ant.ReflectorSpacing, ...
+             ant.DirectorLength(:)', ant.DirectorSpacing(:)' ];
+    GEOMETRII(end+1,:) = geom;
+
+    try
+        [D, FB, S11max] = evalueazaAntena(ant, P);
+        p = max(0, P.Dmin  - D)     ...
+          + max(0, P.FBmin - FB)    ...
+          + max(0, S11max  - P.S11max);
+        F = -D + P.K * p;
+    catch
+        D = NaN; FB = NaN; S11max = NaN;
+        F = 1e6;
+    end
+
+    ISTORIC(end+1,:) = [NR_EVAL, F, D, FB, S11max];
+
+    % Raportare in consola. In faza initiala de esantionare, evaluarile se
+    % succed rapid si este suficienta o raportare la fiecare 10. In faza
+    % asistata de model, fiecare iteratie consuma o singura analiza
+    % electromagnetica, precedata de reconstruirea modelului surogat, astfel
+    % incat raportarea se face la fiecare evaluare.
+    if NR_EVAL <= 100
+        pasRaportare = 10;
+    else
+        pasRaportare = 1;
+    end
+
+    if mod(NR_EVAL, pasRaportare) == 0
+        fprintf('  eval %4d | %s | F = %10.3f | cea mai buna = %10.3f\n', ...
+                NR_EVAL, datestr(now,'HH:MM:SS'), F, min(ISTORIC(:,2)));
+    end
+
+    % salvare de siguranta, pentru a nu pierde datele in caz de intrerupere
+    if mod(NR_EVAL, 5) == 0
+        istoricPartial   = ISTORIC;   %#ok<NASGU>
+        geometriiPartial = GEOMETRII; %#ok<NASGU>
+        parametriPartial = P;         %#ok<NASGU>
+        save('sadea_istoric_partial.mat', ...
+             'istoricPartial','geometriiPartial','parametriPartial');
+    end
+end
+
+function s = verdict(c)
+    if c, s = 'DA'; else, s = 'NU'; end
+end
