@@ -1,0 +1,331 @@
+%% MINIATURIZAREA UNEI ANTENE MICROSTRIP PRIN OPTIMIZARE TOPOLOGICA CU GA
+%
+%  Antena initiala rezoneaza la 4,9 GHz. Suprafata elementului radiant este
+%  discretizata intr-o retea de 10 x 10 celule elementare, fiecare putand fi
+%  prezenta sau absenta. Algoritmul genetic determina configuratia binara
+%  pentru care antena rezoneaza la 2,16 GHz, pastrand gabaritul initial.
+%
+%  Sursa configuratiei: exemplul de miniaturizare din documentatia Antenna
+%  Toolbox, bazat pe Herscovici (2002) si Lamsalli (2016).
+%
+%  REGIM DE LUCRU: se ruleaza intai cu REGIM_TEST = true pentru verificarea
+%  lantului de calcul si masurarea duratei unei evaluari.
+
+clear; clc; close all;
+
+REGIM_TEST = false;       % true = proba rapida (8 indivizi, 2 generatii)
+                          % false = rulare completa (20 indivizi, 25 generatii)
+NR_WORKERI = 4;           % vezi justificarea din sectiunea 2.2.2
+
+%% ================== 0. PROTECTII ==================
+%  Afisarea grafica se dezactiveaza pe durata optimizarii: barele de progres
+%  deschise de rutinele de analiza pot bloca subsistemul grafic atunci cand
+%  numarul de evaluari succesive este mare.
+set(0, 'DefaultFigureVisible', 'off');
+warningState = warning('off', 'all');
+
+idRulare  = sprintf('GA_patch_%s', datestr(now,'yyyymmdd_HHMM'));
+diary([idRulare '.txt']); diary on;
+
+fprintf('==============================================\n');
+fprintf('  %s\n', idRulare);
+fprintf('  Inceput: %s\n', datestr(now));
+fprintf('  MATLAB R%s | %d nuclee | %d workeri\n', ...
+        version('-release'), feature('numcores'), NR_WORKERI);
+fprintf('==============================================\n\n');
+
+%% ================== 1. ANTENA INITIALA LA 4,9 GHz ==================
+% Parametrii liniei de alimentare in trepte
+inputs.f2Width  = 8.34e-3;
+inputs.f1Width  = 10e-3;
+inputs.f2Length = 1.5e-3;
+inputs.f1Length = 2.87e-3;
+
+% Substratul
+inputs.height        = 1.6e-3;
+inputs.Subs          = dielectric("FR4");
+inputs.Subs.Thickness = inputs.height;
+
+% Planul de masa
+inputs.groundPlaneLength = 25e-3;
+inputs.groundPlaneWidth  = 50e-3;
+
+% Linia de alimentare
+f1 = antenna.Rectangle(Length=inputs.f1Length, Width=inputs.f1Width, ...
+     Center=[0, -inputs.groundPlaneWidth/2+inputs.f1Width/2]);
+f2 = antenna.Rectangle(Length=inputs.f2Length, Width=inputs.f2Width, ...
+     Center=[0, -inputs.groundPlaneWidth/2+inputs.f1Width+inputs.f2Width/2]);
+inputs.feedArea = f1 + f2;
+
+inputs.feedLocation = [0, -inputs.groundPlaneWidth/2, inputs.height];
+inputs.ground = antenna.Rectangle(Length=inputs.groundPlaneLength, ...
+                Width=inputs.groundPlaneWidth, Center=[0 0]);
+
+% Elementul radiant initial
+inputs.patchLength = 17.58e-3;
+inputs.patchWidth  = 13.85e-3;
+
+patchRect5GHz = antenna.Rectangle(Length=inputs.patchLength, Width=inputs.patchWidth, ...
+    Center=[0, -inputs.groundPlaneWidth/2+inputs.f1Width+inputs.f2Width+inputs.patchWidth/2]);
+
+antAt5GHz = pcbStack(Layers={inputs.feedArea + patchRect5GHz, inputs.Subs, inputs.ground}, ...
+    BoardThickness=inputs.height, BoardShape=inputs.ground, ...
+    FeedLocations=[inputs.feedLocation(1:2), 1, 3]);
+
+fprintf('Antena initiala: %.2f x %.2f mm\n', ...
+        inputs.patchLength*1e3, inputs.patchWidth*1e3);
+
+%% ================== 2. DISCRETIZAREA IN CELULE ==================
+inputs.rows = 10;
+inputs.cols = 10;
+inputs.unitPatches     = cell(inputs.rows, inputs.cols);
+inputs.unitPatchLength = inputs.patchLength/inputs.cols;
+inputs.unitPatchWidth  = inputs.patchWidth /inputs.rows;
+inputs.overlapWidth    = 0.2e-3;   % suprapunere minima pentru continuitate
+inputs.commCenterX     = -inputs.patchLength/2;
+inputs.commCenterY     = -inputs.groundPlaneWidth/2+inputs.f1Width+inputs.f2Width;
+
+for i = 1:inputs.rows
+    for j = 1:inputs.cols
+        inputs.unitPatches{i,j} = antenna.Rectangle( ...
+            Length = inputs.unitPatchLength + inputs.overlapWidth/2, ...
+            Width  = inputs.unitPatchWidth  + inputs.overlapWidth/2, ...
+            Center = [(i-1)*inputs.unitPatchLength + inputs.unitPatchLength/2 + inputs.commCenterX, ...
+                      (j-1)*inputs.unitPatchWidth  + inputs.unitPatchWidth/2  + inputs.commCenterY]);
+    end
+end
+
+nVar = inputs.rows * inputs.cols;
+fprintf('Celule elementare: %d x %d = %d variabile binare\n', ...
+        inputs.rows, inputs.cols, nVar);
+fprintf('Dimensiunea unei celule: %.3f x %.3f mm\n\n', ...
+        inputs.unitPatchLength*1e3, inputs.unitPatchWidth*1e3);
+
+%% ================== 3. VERIFICARE PRELIMINARA ==================
+fprintf('Se evalueaza o configuratie de proba...\n');
+tic;
+costProba = objectiveFunction(inputs, ones(1, nVar));
+tEval = toc;
+fprintf('  cost = %.4f   (durata: %.1f s)\n\n', costProba, tEval);
+
+%% ================== 4. OPTIUNILE ALGORITMULUI ==================
+%  Dimensiunea populatiei si numarul de generatii au fost reduse fata de
+%  valorile implicite ale functiei ga, care pentru o problema cu 100 de
+%  variabile ar impune o populatie de 200 de indivizi. Reducerea a fost
+%  impusa de costul unei evaluari: configuratiile pixelate prezinta contur
+%  fragmentat, ceea ce conduce la o discretizare mult mai fina decat in
+%  cazul unui element radiant compact si, implicit, la un timp de analiza
+%  de aproximativ sase ori mai mare.
+if REGIM_TEST
+    dimPopulatie = 8;   nrGeneratii = 2;
+else
+    dimPopulatie = 20;  nrGeneratii = 25;
+end
+
+nrEvaluari = dimPopulatie * (nrGeneratii + 1);
+fprintf('Populatie: %d | Generatii: %d | Evaluari estimate: %d\n', ...
+        dimPopulatie, nrGeneratii, nrEvaluari);
+%  Estimarea se corecteaza cu un factor care tine seama de faptul ca
+%  evaluarea de proba foloseste configuratia compacta, mai rapid de analizat
+%  decat configuratiile pixelate generate de algoritm.
+factorCorectie = 6;
+fprintf('Durata estimata: %.1f ore (cu %d workeri)\n', ...
+        nrEvaluari*tEval*factorCorectie/NR_WORKERI/3600, NR_WORKERI);
+fprintf('  (estimare corectata; evaluarea de proba subestimeaza durata)\n\n');
+
+% pool paralel cu numar limitat de procese
+pool = gcp('nocreate');
+if ~isempty(pool) && pool.NumWorkers ~= NR_WORKERI
+    delete(pool); pool = [];
+end
+if isempty(pool)
+    parpool('Processes', NR_WORKERI);
+end
+
+optiuni = optimoptions('ga', ...
+    'PopulationSize', dimPopulatie, ...
+    'MaxGenerations',  nrGeneratii, ...
+    'UseParallel',     true, ...
+    'PlotFcn',         [], ...          % ESENTIAL: nicio figura in timpul rularii
+    'Display',         'iter', ...
+    'OutputFcn',       @salveazaGeneratie);
+
+%% ================== 5. OPTIMIZAREA ==================
+fprintf('Se porneste algoritmul genetic...\n');
+cron = tic;
+
+[x, fval, exitflag, output, population, scores] = ga( ...
+    @(v) objectiveFunction(inputs, v), ...
+    nVar, ...
+    [], [], [], [], ...
+    zeros(1, nVar), ...          % limita inferioara
+    ones(1, nVar), ...           % limita superioara
+    [], ...
+    1:nVar, ...                  % toate variabilele sunt intregi
+    optiuni);
+
+durata = toc(cron);
+
+%% ================== 6. ANTENA OPTIMIZATA ==================
+patchOptim   = construiestePatch(inputs, x);
+optimizedAnt = pcbStack(Layers={patchOptim, inputs.Subs, inputs.ground}, ...
+    BoardThickness=inputs.height, BoardShape=inputs.ground, ...
+    FeedLocations=[inputs.feedLocation(1:2), 1, 3]);
+
+fprintf('\n==============================================\n');
+fprintf('  REZULTATELE OPTIMIZARII\n');
+fprintf('==============================================\n');
+fprintf('Durata:                %.2f ore\n', durata/3600);
+fprintf('Evaluari consumate:    %d\n', output.funccount);
+fprintf('Generatii parcurse:    %d\n', output.generations);
+fprintf('Valoarea functiei:     %.4f\n', fval);
+fprintf('Celule active:         %d din %d\n', sum(x), nVar);
+
+% frecventa de rezonanta obtinuta
+sOpt = sparameters(optimizedAnt, linspace(1.8e9, 2.6e9, 41));
+S11  = 20*log10(abs(rfparam(sOpt,1,1)));
+[minS11, idx] = min(S11);
+fRez = sOpt.Frequencies(idx);
+fprintf('Frecventa de rezonanta: %.3f GHz  (S11 = %.2f dB)\n', fRez/1e9, minS11);
+
+%% ================== 7. ANTENA CONVENTIONALA LA 2,16 GHz ==================
+conv = inputs;
+conv.groundPlaneLength = 60e-3;
+conv.groundPlaneWidth  = 70e-3;
+conv.feedLocation      = [0, -conv.groundPlaneWidth/2, conv.height];
+
+g1 = antenna.Rectangle(Length=conv.f1Length, Width=conv.f1Width, ...
+     Center=[0, -conv.groundPlaneWidth/2+conv.f1Width/2]);
+g2 = antenna.Rectangle(Length=conv.f2Length, Width=conv.f2Width, ...
+     Center=[0, -conv.groundPlaneWidth/2+conv.f1Width+conv.f2Width/2]);
+conv.feedArea = g1 + g2;
+conv.ground   = antenna.Rectangle(Length=conv.groundPlaneLength, ...
+                Width=conv.groundPlaneWidth, Center=[0 0]);
+
+patchRect2GHz = antenna.Rectangle(Length=42e-3, Width=33.7e-3, ...
+    Center=[0, -conv.groundPlaneWidth/2+conv.f1Width+conv.f2Width+33.7e-3/2]);
+
+antAt2GHz = pcbStack(Layers={conv.feedArea + patchRect2GHz, conv.Subs, conv.ground}, ...
+    BoardThickness=conv.height, BoardShape=conv.ground, ...
+    FeedLocations=[conv.feedLocation(1:2), 1, 3]);
+
+ariaConv   = 42e-3 * 33.7e-3;
+ariaOptim  = inputs.patchLength * inputs.patchWidth;
+reducere   = 100 * (1 - ariaOptim/ariaConv);
+
+fprintf('\nComparatie cu antena conventionala la 2,16 GHz:\n');
+fprintf('  Conventionala: %.2f x %.2f mm  (%.1f mm2)\n', 42, 33.7, ariaConv*1e6);
+fprintf('  Optimizata:    %.2f x %.2f mm  (%.1f mm2)\n', ...
+        inputs.patchLength*1e3, inputs.patchWidth*1e3, ariaOptim*1e6);
+fprintf('  Reducerea suprafetei: %.2f %%\n', reducere);
+
+%% ================== 8. SALVARE ==================
+fisierMat = [idRulare '.mat'];
+save(fisierMat, 'x','fval','exitflag','output','population','scores', ...
+     'inputs','optimizedAnt','antAt5GHz','antAt2GHz','durata', ...
+     'dimPopulatie','nrGeneratii','fRez','minS11','reducere','S11','-v7.3');
+fprintf('\nRezultate salvate in: %s\n', fisierMat);
+diary off;
+
+%% ================== 9. FIGURI ==================
+if ~(usejava('desktop') && feature('ShowFigureWindows'))
+    fprintf('Rulare fara interfata grafica: figurile se genereaza ulterior.\n');
+    return
+end
+set(0, 'DefaultFigureVisible', 'on');
+warning(warningState);
+
+figure('Name','Topologia optimizata'); show(optimizedAnt);
+figure('Name','Adaptarea antenei optimizate'); rfplot(sOpt); grid on;
+figure('Name','Antena initiala 4,9 GHz'); show(antAt5GHz);
+
+figure('Name','Configuratia binara');
+imagesc(reshape(x,inputs.rows,inputs.cols)); axis equal tight;
+colormap(gray); title('Distributia celulelor active');
+
+
+%% ============ FUNCTII AUXILIARE ============
+
+function patchNew = construiestePatch(inputs, designVector)
+    % Construieste elementul radiant pornind de la vectorul binar.
+    designVector = reshape(designVector, inputs.rows, inputs.cols);
+    designVector(5:6,1) = 1;      % celulele din dreptul alimentarii raman active
+
+    patchNew = copy(inputs.feedArea);
+
+    for i = 1:inputs.rows
+        for j = 1:inputs.cols
+            if designVector(i,j) == 1
+                patchNew = patchNew + inputs.unitPatches{i,j};
+            end
+        end
+    end
+
+    % Celulele adiacente pe diagonala se ating doar intr-un punct, ceea ce
+    % nu asigura continuitatea electrica. Se adauga o suprapunere.
+    for i = 1:inputs.rows-1
+        for j = 1:inputs.cols-1
+            dV4 = designVector(i:i+1, j:j+1);
+            if all(all(dV4 == [1 0;0 1])) || all(all(dV4 == [0 1;1 0]))
+                overlap = antenna.Rectangle( ...
+                    Length = 2*inputs.unitPatchLength, ...
+                    Width  = inputs.overlapWidth, ...
+                    Center = [i*inputs.unitPatchLength + inputs.commCenterX, ...
+                              j*inputs.unitPatchWidth  + inputs.commCenterY]);
+                patchNew = patchNew + overlap;
+            end
+        end
+    end
+end
+
+function val = objectiveFunction(inputs, designVector)
+    % Functia obiectiv urmareste deplasarea frecventei de rezonanta catre
+    % valoarea dorita, prin ponderarea adaptarii cu un factor exponential
+    % care penalizeaza abaterea de la aceasta frecventa.
+    patchNew = construiestePatch(inputs, designVector);
+
+    ant = pcbStack(Layers={patchNew, inputs.Subs, inputs.ground}, ...
+        BoardThickness=inputs.height, BoardShape=inputs.ground, ...
+        FeedLocations=[inputs.feedLocation(1:2), 1, 3]);
+
+    N       = 5;         % numarul de puncte de esantionare. Fiecare punct
+                         % impune o rezolvare electromagnetica completa,
+                         % fiind principalul consumator de timp al unei
+                         % evaluari. Reducerea de la 10 la 5 puncte pastreaza
+                         % forma ponderarii exponentiale in jurul frecventei
+                         % dorite si injumatateste durata unei analize.
+    fd      = 2.16e9;    % frecventa dorita
+    epsilon = 0.1e9;     % semilargimea intervalului analizat
+    f       = linspace(fd-epsilon, fd+epsilon, N);
+
+    s   = sparameters(ant, f);
+    S11 = rfparam(s,1,1);
+
+    val = 0;
+    for i = 1:N
+        val = val + abs(S11(i)) * exp(-20*abs((f(i)-fd)/fd));
+    end
+end
+
+function [state, options, optchanged] = salveazaGeneratie(options, state, flag)
+    % Salveaza populatia completa la finalul fiecarei generatii, astfel
+    % incat o intrerupere a rularii sa nu duca la pierderea rezultatelor.
+    optchanged = false;
+    if strcmp(flag, 'init')
+        fprintf('\n  Generatia   Ora        Cea mai buna      Media\n');
+        return
+    end
+
+    date.generatie  = state.Generation;
+    date.populatie  = state.Population;
+    date.scoruri    = state.Score;
+    date.ceaMaiBuna = min(state.Score);
+    date.media      = mean(state.Score);
+    date.momentul   = datestr(now);
+
+    save(sprintf('ga_generatia_%03d.mat', state.Generation), 'date');
+
+    fprintf('  %6d      %s   %12.5f   %10.5f\n', ...
+            state.Generation, datestr(now,'HH:MM:SS'), ...
+            min(state.Score), mean(state.Score));
+end
