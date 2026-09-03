@@ -1,0 +1,561 @@
+%% ANALIZA DE ROBUSTETE LA TOLERANTE DE FABRICATIE
+%
+%  Evalueaza comportamentul unei solutii optimizate atunci cand toate
+%  dimensiunile geometrice se abat simultan de la valorile nominale,
+%  conform metodologiei descrise in subcapitolul 2.6.
+%
+%  Abaterile sunt modelate prin variabile aleatoare cu distributie normala,
+%  de medie nula si abatere standard sigma, aplicate independent fiecarei
+%  dimensiuni. Se analizeaza doua scenarii: sigma = 1 mm, corespunzator unei
+%  executii ingrijite, si sigma = 3 mm, corespunzator uneia sumare.
+%
+%  Varianta destinata solutiei obtinute prin metoda bazata pe model surogat,
+%  cu unsprezece variabile de proiectare. Perturbatiile se aplica tuturor
+%  celor unsprezece dimensiuni, inclusiv lungimii elementului activ.
+%
+%  Durata estimata: 7-10 minute.
+
+clear; clc; close all;
+
+set(0, 'DefaultFigureVisible', 'off');
+warningState = warning('off', 'all');
+
+N_REALIZARI = 100;  % numar de configuratii perturbate per scenariu
+SIGMA       = [1e-3, 3e-3];   % abaterile standard analizate [m]
+
+rng(42);            % initializare fixa, pentru reproductibilitatea rezultatelor
+
+%% ================== 1. INCARCAREA SOLUTIEI ==================
+FISIER   = 'surrogate_yagi_20260808_1446.mat';   % <<< se modifica dupa caz
+ETICHETA = 'metoda surogat';
+
+R  = load(FISIER);
+P  = R.P;
+x0 = R.xOpt(:)';
+et = R.etichete;
+
+fprintf('Analiza de robustete: %s\n', ETICHETA);
+fprintf('Fisier: %s\n\n', FISIER);
+
+%% ================== 2. UNIFORMIZAREA EVALUARII ==================
+%  Aceiasi parametri de evaluare pentru toate solutiile, conform cerintei
+%  de comparabilitate formulate in sectiunea 2.2.3.
+P.nFrecv    = 5;
+P.freqBanda = linspace((1-P.banda/2)*P.fc, (1+P.banda/2)*P.fc, P.nFrecv);
+P.az = -180:5:180;
+P.el =  -90:5:90;
+
+nVar   = numel(x0);
+lambda = physconst('LightSpeed') / P.fc;
+
+%% ================== 3. VALORILE NOMINALE ==================
+[Dnom, FBnom, Snom] = evalueazaAntena(construiesteAntena(x0,P), P);
+fprintf('Valorile nominale:\n');
+fprintf('  D = %.2f dBi (marja %+.2f) | FB = %.2f dB (marja %+.2f) | S11 = %.2f dB (marja %+.2f)\n\n', ...
+        Dnom, Dnom-P.Dmin, FBnom, FBnom-P.FBmin, Snom, P.S11max-Snom);
+
+fprintf('Variabile perturbate: %d | Realizari per scenariu: %d\n', nVar, N_REALIZARI);
+fprintf('Analize electromagnetice totale: %d\n\n', numel(SIGMA)*N_REALIZARI);
+
+%% ================== 4. SIMULAREA MONTE CARLO ==================
+rezultate = struct();
+
+for is = 1:numel(SIGMA)
+    sigma = SIGMA(is);
+    fprintf('--- Scenariul %d: sigma = %.1f mm (%.5f lambda) ---\n', ...
+            is, sigma*1e3, sigma/lambda);
+
+    D  = zeros(N_REALIZARI,1);
+    FB = zeros(N_REALIZARI,1);
+    S  = zeros(N_REALIZARI,1);
+    X  = zeros(N_REALIZARI, nVar);
+
+    cron = tic;
+    for k = 1:N_REALIZARI
+        % perturbatie independenta pe fiecare dimensiune
+        x = x0 + sigma * randn(1, nVar);
+        X(k,:) = x;
+        try
+            [D(k), FB(k), S(k)] = evalueazaAntena(construiesteAntena(x,P), P);
+        catch
+            D(k) = NaN; FB(k) = NaN; S(k) = NaN;
+        end
+        if mod(k,20) == 0
+            fprintf('  %3d/%d realizari\n', k, N_REALIZARI);
+        end
+    end
+    dur = toc(cron);
+
+    conf = (D > P.Dmin) & (FB > P.FBmin) & (S < P.S11max);
+
+    fprintf('\n  Durata: %.1f minute\n', dur/60);
+    fprintf('  %-22s %10s %10s %10s\n', '', 'nominal', 'medie', 'ab. std.');
+    fprintf('  %-22s %10.2f %10.2f %10.2f\n', 'Directivitate [dBi]', ...
+            Dnom, mean(D,'omitnan'), std(D,'omitnan'));
+    fprintf('  %-22s %10.2f %10.2f %10.2f\n', 'Raport F/B [dB]', ...
+            FBnom, mean(FB,'omitnan'), std(FB,'omitnan'));
+    fprintf('  %-22s %10.2f %10.2f %10.2f\n', 'S11 maxim [dB]', ...
+            Snom, mean(S,'omitnan'), std(S,'omitnan'));
+    fprintf('\n  Configuratii conforme: %d din %d (%.0f%%)\n', ...
+            sum(conf), N_REALIZARI, 100*mean(conf));
+    fprintf('    respecta D  : %3d (%.0f%%)\n', sum(D>P.Dmin),  100*mean(D>P.Dmin));
+    fprintf('    respecta FB : %3d (%.0f%%)\n', sum(FB>P.FBmin), 100*mean(FB>P.FBmin));
+    fprintf('    respecta S11: %3d (%.0f%%)\n\n', sum(S<P.S11max), 100*mean(S<P.S11max));
+
+    rezultate(is).sigma = sigma;
+    rezultate(is).D = D;  rezultate(is).FB = FB;  rezultate(is).S = S;
+    rezultate(is).X = X;  rezultate(is).conf = conf;
+    rezultate(is).durata = dur;
+end
+
+%% ================== 5. SALVARE ==================
+numeFisier = sprintf('robustete_%s.mat', regexprep(lower(ETICHETA),'\s+','_'));
+save(numeFisier, 'rezultate','x0','et','P','Dnom','FBnom','Snom', ...
+     'ETICHETA','N_REALIZARI','SIGMA','nVar','lambda');
+fprintf('Rezultate salvate in: %s\n', numeFisier);
+
+%% ================== 6. FIGURI ==================
+if ~(usejava('desktop') && feature('ShowFigureWindows'))
+    return
+end
+set(0, 'DefaultFigureVisible', 'on');
+warning(warningState);
+
+for is = 1:numel(SIGMA)
+    r = rezultate(is);
+    figure('Name', sprintf('Robustete sigma=%.0fmm - %s', SIGMA(is)*1e3, ETICHETA), ...
+           'Position', [100 100 1100 380]);
+
+    subplot(1,3,1);
+    histogram(r.D, 20); hold on; grid on;
+    xline(Dnom, '--k', 'nominal'); xline(P.Dmin, ':r', 'cerinta');
+    xlabel('Directivitate [dBi]'); ylabel('Numar de realizari');
+    title('Directivitate');
+
+    subplot(1,3,2);
+    histogram(r.FB, 20); hold on; grid on;
+    xline(FBnom, '--k', 'nominal'); xline(P.FBmin, ':r', 'cerinta');
+    xlabel('Raport fata-spate [dB]');
+    title(sprintf('Raport F/B  (\\sigma = %.0f mm)', SIGMA(is)*1e3));
+
+    subplot(1,3,3);
+    histogram(r.S, 20); hold on; grid on;
+    xline(Snom, '--k', 'nominal'); xline(P.S11max, ':r', 'cerinta');
+    xlabel('S_{11} maxim [dB]');
+    title('Adaptare');
+end
+
+
+%% ============ FUNCTII AUXILIARE ============
+
+function ant = construiesteAntena(x, P)
+    ant = yagiUda;
+    ant.NumDirectors     = P.nDirect;
+    ant.Exciter          = P.excitator;
+    ant.Exciter.Length   = x(P.iLexc);
+    ant.ReflectorLength  = x(P.iLref);
+    ant.ReflectorSpacing = x(P.iSref);
+    ant.DirectorLength   = x(P.iLdir);
+    ant.DirectorSpacing  = x(P.iSdir);
+end
+
+function [D, FB, S11max] = evalueazaAntena(ant, P)
+    delete(findall(0, 'Type', 'figure', 'Tag', 'TMWWaitbar'));
+
+    Dgrila = pattern(ant, P.fc, P.az, P.el);
+    [D, idx]   = max(Dgrila(:));
+    [iel, iaz] = ind2sub(size(Dgrila), idx);
+    azSpate = mod(P.az(iaz) + 360, 360) - 180;
+    elSpate = -P.el(iel);
+    FB = D - pattern(ant, P.fc, azSpate, elSpate);
+
+    Z      = impedance(ant, P.freqBanda);
+    Gamma  = (Z - P.Z0) ./ (Z + P.Z0);
+    S11max = max(20*log10(abs(Gamma)));
+end
+
+
+%% ANALIZA DE ROBUSTETE LA TOLERANTE DE FABRICATIE
+%
+%  Evalueaza comportamentul unei solutii optimizate atunci cand toate
+%  dimensiunile geometrice se abat simultan de la valorile nominale,
+%  conform metodologiei descrise in subcapitolul 2.6.
+%
+%  Abaterile sunt modelate prin variabile aleatoare cu distributie normala,
+%  de medie nula si abatere standard sigma, aplicate independent fiecarei
+%  dimensiuni. Se analizeaza doua scenarii: sigma = 1 mm, corespunzator unei
+%  executii ingrijite, si sigma = 3 mm, corespunzator uneia sumare.
+%
+%  Varianta destinata solutiei obtinute prin algoritmul SADEA, care are zece
+%  variabile de proiectare, lungimea elementului activ nefacand obiectul
+%  optimizarii. Perturbatiile se aplica celor zece dimensiuni optimizate.
+%
+%  Durata estimata: 7-10 minute.
+
+clear; clc; close all;
+
+set(0, 'DefaultFigureVisible', 'off');
+warningState = warning('off', 'all');
+
+N_REALIZARI = 100;  % numar de configuratii perturbate per scenariu
+SIGMA       = [1e-3, 3e-3];   % abaterile standard analizate [m]
+
+rng(42);            % initializare fixa, pentru reproductibilitatea rezultatelor
+
+%% ================== 1. INCARCAREA SOLUTIEI ==================
+%  Solutia provine din fisierul de salvare partiala al rularii SADEA, care
+%  contine geometriile tuturor configuratiilor evaluate, dar nu si obiectul
+%  antena. Antena se reconstruieste pornind de la configuratia de referinta,
+%  din care se preia elementul activ - acesta nu a facut obiectul
+%  optimizarii in cadrul acestui studiu de caz - si aplicand cele zece
+%  dimensiuni ale solutiei optime.
+
+FISIER   = 'sadea_istoric_final.mat';   % <<< se modifica dupa caz
+ETICHETA = 'SADEA';
+
+R = load(FISIER, 'istoricPartial', 'geometriiPartial', 'parametriPartial');
+[~, iBest] = min(R.istoricPartial(:,2));
+x0 = R.geometriiPartial(iBest, :);
+P  = R.parametriPartial;
+
+fprintf('Solutia retinuta: evaluarea %d din %d\n', iBest, size(R.geometriiPartial,1));
+fprintf('  valori inregistrate in cursul rularii: D = %.2f dBi, FB = %.2f dB, S11 = %.2f dB\n', ...
+        R.istoricPartial(iBest,3), R.istoricPartial(iBest,4), R.istoricPartial(iBest,5));
+
+fprintf('Analiza de robustete: %s\n', ETICHETA);
+fprintf('Fisier: %s\n\n', FISIER);
+
+%% ================== 2. UNIFORMIZAREA EVALUARII ==================
+%  Aceiasi parametri de evaluare pentru toate solutiile, conform cerintei
+%  de comparabilitate formulate in sectiunea 2.2.3.
+P.nFrecv    = 5;
+P.freqBanda = linspace((1-P.banda/2)*P.fc, (1+P.banda/2)*P.fc, P.nFrecv);
+P.az = -180:5:180;
+P.el =  -90:5:90;
+
+%  Se reconstruieste configuratia de referinta, din care se preia elementul
+%  activ, mentinut fix pe parcursul optimizarii.
+antBaza = design(yagiUda, P.fc);
+antBaza.NumDirectors = P.nDirect;
+if numel(antBaza.DirectorLength) ~= P.nDirect
+    antBaza.DirectorLength = repmat(antBaza.DirectorLength(1), 1, P.nDirect);
+end
+if numel(antBaza.DirectorSpacing) ~= P.nDirect
+    antBaza.DirectorSpacing = repmat(antBaza.DirectorSpacing(1), 1, P.nDirect);
+end
+P.excitator = antBaza.Exciter;
+
+%  Ordinea variabilelor in vectorul de geometrie, asa cum a fost inregistrata
+P.iLref = 1;
+P.iSref = 2;
+P.iLdir = 3             : 2 + P.nDirect;
+P.iSdir = 3 + P.nDirect : 2 + 2*P.nDirect;
+
+et = [{'L_reflector','S_reflector'}, ...
+      arrayfun(@(k) sprintf('L_director_%d',k), 1:P.nDirect, 'UniformOutput', false), ...
+      arrayfun(@(k) sprintf('S_director_%d',k), 1:P.nDirect, 'UniformOutput', false)];
+
+nVar   = numel(x0);
+lambda = physconst('LightSpeed') / P.fc;
+
+%% ================== 3. VALORILE NOMINALE ==================
+[Dnom, FBnom, Snom] = evalueazaAntena(construiesteAntena(x0,P), P);
+fprintf('Valorile nominale:\n');
+fprintf('  D = %.2f dBi (marja %+.2f) | FB = %.2f dB (marja %+.2f) | S11 = %.2f dB (marja %+.2f)\n\n', ...
+        Dnom, Dnom-P.Dmin, FBnom, FBnom-P.FBmin, Snom, P.S11max-Snom);
+
+fprintf('Variabile perturbate: %d | Realizari per scenariu: %d\n', nVar, N_REALIZARI);
+fprintf('Analize electromagnetice totale: %d\n\n', numel(SIGMA)*N_REALIZARI);
+
+%% ================== 4. SIMULAREA MONTE CARLO ==================
+rezultate = struct();
+
+for is = 1:numel(SIGMA)
+    sigma = SIGMA(is);
+    fprintf('--- Scenariul %d: sigma = %.1f mm (%.5f lambda) ---\n', ...
+            is, sigma*1e3, sigma/lambda);
+
+    D  = zeros(N_REALIZARI,1);
+    FB = zeros(N_REALIZARI,1);
+    S  = zeros(N_REALIZARI,1);
+    X  = zeros(N_REALIZARI, nVar);
+
+    cron = tic;
+    for k = 1:N_REALIZARI
+        % perturbatie independenta pe fiecare dimensiune
+        x = x0 + sigma * randn(1, nVar);
+        X(k,:) = x;
+        try
+            [D(k), FB(k), S(k)] = evalueazaAntena(construiesteAntena(x,P), P);
+        catch
+            D(k) = NaN; FB(k) = NaN; S(k) = NaN;
+        end
+        if mod(k,20) == 0
+            fprintf('  %3d/%d realizari\n', k, N_REALIZARI);
+        end
+    end
+    dur = toc(cron);
+
+    conf = (D > P.Dmin) & (FB > P.FBmin) & (S < P.S11max);
+
+    fprintf('\n  Durata: %.1f minute\n', dur/60);
+    fprintf('  %-22s %10s %10s %10s\n', '', 'nominal', 'medie', 'ab. std.');
+    fprintf('  %-22s %10.2f %10.2f %10.2f\n', 'Directivitate [dBi]', ...
+            Dnom, mean(D,'omitnan'), std(D,'omitnan'));
+    fprintf('  %-22s %10.2f %10.2f %10.2f\n', 'Raport F/B [dB]', ...
+            FBnom, mean(FB,'omitnan'), std(FB,'omitnan'));
+    fprintf('  %-22s %10.2f %10.2f %10.2f\n', 'S11 maxim [dB]', ...
+            Snom, mean(S,'omitnan'), std(S,'omitnan'));
+    fprintf('\n  Configuratii conforme: %d din %d (%.0f%%)\n', ...
+            sum(conf), N_REALIZARI, 100*mean(conf));
+    fprintf('    respecta D  : %3d (%.0f%%)\n', sum(D>P.Dmin),  100*mean(D>P.Dmin));
+    fprintf('    respecta FB : %3d (%.0f%%)\n', sum(FB>P.FBmin), 100*mean(FB>P.FBmin));
+    fprintf('    respecta S11: %3d (%.0f%%)\n\n', sum(S<P.S11max), 100*mean(S<P.S11max));
+
+    rezultate(is).sigma = sigma;
+    rezultate(is).D = D;  rezultate(is).FB = FB;  rezultate(is).S = S;
+    rezultate(is).X = X;  rezultate(is).conf = conf;
+    rezultate(is).durata = dur;
+end
+
+%% ================== 5. SALVARE ==================
+numeFisier = sprintf('robustete_%s.mat', regexprep(lower(ETICHETA),'\s+','_'));
+save(numeFisier, 'rezultate','x0','et','P','Dnom','FBnom','Snom', ...
+     'ETICHETA','N_REALIZARI','SIGMA','nVar','lambda');
+fprintf('Rezultate salvate in: %s\n', numeFisier);
+
+%% ================== 6. FIGURI ==================
+if ~(usejava('desktop') && feature('ShowFigureWindows'))
+    return
+end
+set(0, 'DefaultFigureVisible', 'on');
+warning(warningState);
+
+for is = 1:numel(SIGMA)
+    r = rezultate(is);
+    figure('Name', sprintf('Robustete sigma=%.0fmm - %s', SIGMA(is)*1e3, ETICHETA), ...
+           'Position', [100 100 1100 380]);
+
+    subplot(1,3,1);
+    histogram(r.D, 20); hold on; grid on;
+    xline(Dnom, '--k', 'nominal'); xline(P.Dmin, ':r', 'cerinta');
+    xlabel('Directivitate [dBi]'); ylabel('Numar de realizari');
+    title('Directivitate');
+
+    subplot(1,3,2);
+    histogram(r.FB, 20); hold on; grid on;
+    xline(FBnom, '--k', 'nominal'); xline(P.FBmin, ':r', 'cerinta');
+    xlabel('Raport fata-spate [dB]');
+    title(sprintf('Raport F/B  (\\sigma = %.0f mm)', SIGMA(is)*1e3));
+
+    subplot(1,3,3);
+    histogram(r.S, 20); hold on; grid on;
+    xline(Snom, '--k', 'nominal'); xline(P.S11max, ':r', 'cerinta');
+    xlabel('S_{11} maxim [dB]');
+    title('Adaptare');
+end
+
+
+%% ============ FUNCTII AUXILIARE ============
+
+function ant = construiesteAntena(x, P)
+    ant = yagiUda;
+    ant.NumDirectors     = P.nDirect;
+    ant.Exciter          = P.excitator;   % lungime fixa, neoptimizata
+    ant.ReflectorLength  = x(P.iLref);
+    ant.ReflectorSpacing = x(P.iSref);
+    ant.DirectorLength   = x(P.iLdir);
+    ant.DirectorSpacing  = x(P.iSdir);
+end
+
+function [D, FB, S11max] = evalueazaAntena(ant, P)
+    delete(findall(0, 'Type', 'figure', 'Tag', 'TMWWaitbar'));
+
+    Dgrila = pattern(ant, P.fc, P.az, P.el);
+    [D, idx]   = max(Dgrila(:));
+    [iel, iaz] = ind2sub(size(Dgrila), idx);
+    azSpate = mod(P.az(iaz) + 360, 360) - 180;
+    elSpate = -P.el(iel);
+    FB = D - pattern(ant, P.fc, azSpate, elSpate);
+
+    Z      = impedance(ant, P.freqBanda);
+    Gamma  = (Z - P.Z0) ./ (Z + P.Z0);
+    S11max = max(20*log10(abs(Gamma)));
+end
+
+%% ANALIZA DE ROBUSTETE LA TOLERANTE DE FABRICATIE
+%
+%  Evalueaza comportamentul unei solutii optimizate atunci cand toate
+%  dimensiunile geometrice se abat simultan de la valorile nominale,
+%  conform metodologiei descrise in subcapitolul 2.6.
+%
+%  Abaterile sunt modelate prin variabile aleatoare cu distributie normala,
+%  de medie nula si abatere standard sigma, aplicate independent fiecarei
+%  dimensiuni. Se analizeaza doua scenarii: sigma = 1 mm, corespunzator unei
+%  executii ingrijite, si sigma = 3 mm, corespunzator uneia sumare.
+%
+%  Varianta destinata solutiei obtinute prin cautare directa in configurarea
+%  extinsa,
+%  cu unsprezece variabile de proiectare. Perturbatiile se aplica tuturor
+%  celor unsprezece dimensiuni, inclusiv lungimii elementului activ.
+%
+%  Durata estimata: 7-10 minute.
+
+clear; clc; close all;
+
+set(0, 'DefaultFigureVisible', 'off');
+warningState = warning('off', 'all');
+
+N_REALIZARI = 100;  % numar de configuratii perturbate per scenariu
+SIGMA       = [1e-3, 3e-3];   % abaterile standard analizate [m]
+
+rng(42);            % initializare fixa, pentru reproductibilitatea rezultatelor
+
+%% ================== 1. INCARCAREA SOLUTIEI ==================
+FISIER   = 'yagi_patternsearch_extins_20260809_1702.mat';   % <<< se modifica dupa caz
+ETICHETA = 'cautare directa';
+
+R  = load(FISIER);
+P  = R.P;
+x0 = R.xOpt(:)';
+et = R.etichete;
+
+fprintf('Analiza de robustete: %s\n', ETICHETA);
+fprintf('Fisier: %s\n\n', FISIER);
+
+%% ================== 2. UNIFORMIZAREA EVALUARII ==================
+%  Aceiasi parametri de evaluare pentru toate solutiile, conform cerintei
+%  de comparabilitate formulate in sectiunea 2.2.3.
+P.nFrecv    = 5;
+P.freqBanda = linspace((1-P.banda/2)*P.fc, (1+P.banda/2)*P.fc, P.nFrecv);
+P.az = -180:5:180;
+P.el =  -90:5:90;
+
+nVar   = numel(x0);
+lambda = physconst('LightSpeed') / P.fc;
+
+%% ================== 3. VALORILE NOMINALE ==================
+[Dnom, FBnom, Snom] = evalueazaAntena(construiesteAntena(x0,P), P);
+fprintf('Valorile nominale:\n');
+fprintf('  D = %.2f dBi (marja %+.2f) | FB = %.2f dB (marja %+.2f) | S11 = %.2f dB (marja %+.2f)\n\n', ...
+        Dnom, Dnom-P.Dmin, FBnom, FBnom-P.FBmin, Snom, P.S11max-Snom);
+
+fprintf('Variabile perturbate: %d | Realizari per scenariu: %d\n', nVar, N_REALIZARI);
+fprintf('Analize electromagnetice totale: %d\n\n', numel(SIGMA)*N_REALIZARI);
+
+%% ================== 4. SIMULAREA MONTE CARLO ==================
+rezultate = struct();
+
+for is = 1:numel(SIGMA)
+    sigma = SIGMA(is);
+    fprintf('--- Scenariul %d: sigma = %.1f mm (%.5f lambda) ---\n', ...
+            is, sigma*1e3, sigma/lambda);
+
+    D  = zeros(N_REALIZARI,1);
+    FB = zeros(N_REALIZARI,1);
+    S  = zeros(N_REALIZARI,1);
+    X  = zeros(N_REALIZARI, nVar);
+
+    cron = tic;
+    for k = 1:N_REALIZARI
+        % perturbatie independenta pe fiecare dimensiune
+        x = x0 + sigma * randn(1, nVar);
+        X(k,:) = x;
+        try
+            [D(k), FB(k), S(k)] = evalueazaAntena(construiesteAntena(x,P), P);
+        catch
+            D(k) = NaN; FB(k) = NaN; S(k) = NaN;
+        end
+        if mod(k,20) == 0
+            fprintf('  %3d/%d realizari\n', k, N_REALIZARI);
+        end
+    end
+    dur = toc(cron);
+
+    conf = (D > P.Dmin) & (FB > P.FBmin) & (S < P.S11max);
+
+    fprintf('\n  Durata: %.1f minute\n', dur/60);
+    fprintf('  %-22s %10s %10s %10s\n', '', 'nominal', 'medie', 'ab. std.');
+    fprintf('  %-22s %10.2f %10.2f %10.2f\n', 'Directivitate [dBi]', ...
+            Dnom, mean(D,'omitnan'), std(D,'omitnan'));
+    fprintf('  %-22s %10.2f %10.2f %10.2f\n', 'Raport F/B [dB]', ...
+            FBnom, mean(FB,'omitnan'), std(FB,'omitnan'));
+    fprintf('  %-22s %10.2f %10.2f %10.2f\n', 'S11 maxim [dB]', ...
+            Snom, mean(S,'omitnan'), std(S,'omitnan'));
+    fprintf('\n  Configuratii conforme: %d din %d (%.0f%%)\n', ...
+            sum(conf), N_REALIZARI, 100*mean(conf));
+    fprintf('    respecta D  : %3d (%.0f%%)\n', sum(D>P.Dmin),  100*mean(D>P.Dmin));
+    fprintf('    respecta FB : %3d (%.0f%%)\n', sum(FB>P.FBmin), 100*mean(FB>P.FBmin));
+    fprintf('    respecta S11: %3d (%.0f%%)\n\n', sum(S<P.S11max), 100*mean(S<P.S11max));
+
+    rezultate(is).sigma = sigma;
+    rezultate(is).D = D;  rezultate(is).FB = FB;  rezultate(is).S = S;
+    rezultate(is).X = X;  rezultate(is).conf = conf;
+    rezultate(is).durata = dur;
+end
+
+%% ================== 5. SALVARE ==================
+numeFisier = sprintf('robustete_%s.mat', regexprep(lower(ETICHETA),'\s+','_'));
+save(numeFisier, 'rezultate','x0','et','P','Dnom','FBnom','Snom', ...
+     'ETICHETA','N_REALIZARI','SIGMA','nVar','lambda');
+fprintf('Rezultate salvate in: %s\n', numeFisier);
+
+%% ================== 6. FIGURI ==================
+if ~(usejava('desktop') && feature('ShowFigureWindows'))
+    return
+end
+set(0, 'DefaultFigureVisible', 'on');
+warning(warningState);
+
+for is = 1:numel(SIGMA)
+    r = rezultate(is);
+    figure('Name', sprintf('Robustete sigma=%.0fmm - %s', SIGMA(is)*1e3, ETICHETA), ...
+           'Position', [100 100 1100 380]);
+
+    subplot(1,3,1);
+    histogram(r.D, 20); hold on; grid on;
+    xline(Dnom, '--k', 'nominal'); xline(P.Dmin, ':r', 'cerinta');
+    xlabel('Directivitate [dBi]'); ylabel('Numar de realizari');
+    title('Directivitate');
+
+    subplot(1,3,2);
+    histogram(r.FB, 20); hold on; grid on;
+    xline(FBnom, '--k', 'nominal'); xline(P.FBmin, ':r', 'cerinta');
+    xlabel('Raport fata-spate [dB]');
+    title(sprintf('Raport F/B  (\\sigma = %.0f mm)', SIGMA(is)*1e3));
+
+    subplot(1,3,3);
+    histogram(r.S, 20); hold on; grid on;
+    xline(Snom, '--k', 'nominal'); xline(P.S11max, ':r', 'cerinta');
+    xlabel('S_{11} maxim [dB]');
+    title('Adaptare');
+end
+
+
+%% ============ FUNCTII AUXILIARE ============
+
+function ant = construiesteAntena(x, P)
+    ant = yagiUda;
+    ant.NumDirectors     = P.nDirect;
+    ant.Exciter          = P.excitator;
+    ant.Exciter.Length   = x(P.iLexc);
+    ant.ReflectorLength  = x(P.iLref);
+    ant.ReflectorSpacing = x(P.iSref);
+    ant.DirectorLength   = x(P.iLdir);
+    ant.DirectorSpacing  = x(P.iSdir);
+end
+
+function [D, FB, S11max] = evalueazaAntena(ant, P)
+    delete(findall(0, 'Type', 'figure', 'Tag', 'TMWWaitbar'));
+
+    Dgrila = pattern(ant, P.fc, P.az, P.el);
+    [D, idx]   = max(Dgrila(:));
+    [iel, iaz] = ind2sub(size(Dgrila), idx);
+    azSpate = mod(P.az(iaz) + 360, 360) - 180;
+    elSpate = -P.el(iel);
+    FB = D - pattern(ant, P.fc, azSpate, elSpate);
+
+    Z      = impedance(ant, P.freqBanda);
+    Gamma  = (Z - P.Z0) ./ (Z + P.Z0);
+    S11max = max(20*log10(abs(Gamma)));
+end
