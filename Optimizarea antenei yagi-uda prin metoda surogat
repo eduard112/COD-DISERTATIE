@@ -1,0 +1,268 @@
+%% OPTIMIZAREA UNEI ANTENE YAGI-UDA CU 6 ELEMENTE PRIN METODA SURROGATE
+%
+%  Structura: 1 reflector + 1 element activ + 4 directori
+%  Variabile de control (11): lungimea si spatierea reflectorului,
+%                             lungimea excitatorului,
+%                             lungimile celor 4 directori,
+%                             spatierile celor 4 directori
+%  Obiectiv: maximizarea directivitatii
+%  Constrangeri: raport fata-spate minim, adaptare minima pe banda
+%
+%  REGIM DE LUCRU: se seteaza REGIM_TEST = true pentru o rulare rapida
+%  de verificare (cateva minute), sau false pentru rularea completa.
+
+clear; clc; close all;
+
+REGIM_TEST = false;       % true = rulare de proba (60 evaluari)
+                          % false = rulare completa (600 evaluari)
+
+%% ================== 1. PARAMETRII PROBLEMEI ==================
+P.nDirect = 4;            % numarul de directori
+P.fc      = 144.5e6;      % frecventa de proiectare [Hz]
+P.Z0      = 200;          % impedanta de referinta [ohm]
+%  Valoarea a fost stabilita pe baza analizei de diagnostic a impedantei
+%  de intrare: configuratia studiata prezinta la rezonanta o rezistenta de
+%  aproximativ 158 ohm, consecinta a spatierilor relativ mari dintre
+%  elemente, care reduc cuplajul mutual. Raportarea la 50 ohm ar limita
+%  adaptarea realizabila la circa -5,6 dB, facand imposibila satisfacerea
+%  constrangerii impuse, in timp ce raportarea la 200 ohm permite atingerea
+%  unui nivel de aproximativ -18 dB. Valoarea corespunde unei linii
+%  bifilare, utilizata curent in domeniul VHF.
+P.banda   = 0.015;        % latimea benzii evaluate, fractiune din fc
+P.nFrecv  = 5;            % numar de frecvente de esantionare
+
+P.Dmin    = 10;           % directivitate minima impusa [dBi]
+P.FBmin   = 20;           % raport fata-spate minim impus [dB]
+P.S11max  = -15;          % adaptare minima impusa [dB]
+P.K       = 75;           % coeficientul de penalizare
+
+% grila unghiulara pentru cautarea maximului diagramei de radiatie
+P.az = -180:5:180;
+P.el =  -90:5:90;
+
+P.freqBanda = linspace((1-P.banda/2)*P.fc, (1+P.banda/2)*P.fc, P.nFrecv);
+
+if REGIM_TEST
+    P.maxEval = 60;
+else
+    P.maxEval = 1000;   % spatiu de cautare cu 11 dimensiuni
+end
+
+%% ================== 2. ANTENA DE REFERINTA ==================
+% Se porneste de la o antena Yagi-Uda dimensionata automat pentru fc.
+fprintf('Se construieste antena de referinta...\n');
+
+% Se dimensioneaza mai intai antena pentru frecventa de lucru, apoi se
+% fixeaza numarul de directori. Ordinea este importanta: functia design
+% nu pastreaza numarul de directori setat inainte de apelarea ei.
+antBaza = design(yagiUda, P.fc);
+antBaza.NumDirectors = P.nDirect;
+
+% dupa modificarea numarului de directori, vectorii de dimensiuni pot
+% ramane scalari; se extind la lungimea corespunzatoare
+if numel(antBaza.DirectorLength) ~= P.nDirect
+    antBaza.DirectorLength = repmat(antBaza.DirectorLength(1), 1, P.nDirect);
+end
+if numel(antBaza.DirectorSpacing) ~= P.nDirect
+    antBaza.DirectorSpacing = repmat(antBaza.DirectorSpacing(1), 1, P.nDirect);
+end
+
+fprintf('  Directori configurati: %d\n', antBaza.NumDirectors);
+
+% excitatorul serveste ca sablon; lungimea lui este variabila de proiectare
+P.excitator = antBaza.Exciter;
+
+% valorile initiale ale variabilelor de control
+% lungimea excitatorului este inclusa deoarece de ea depinde direct
+% impedanta de intrare si, implicit, nivelul de adaptare realizabil
+% Indicii variabilelor in vectorul de proiectare
+P.iLref = 1;
+P.iSref = 2;
+P.iLexc = 3;
+P.iLdir = 4              : 3 + P.nDirect;
+P.iSdir = 4 + P.nDirect  : 3 + 2*P.nDirect;
+
+x0    = [ antBaza.ReflectorLength, ...
+          antBaza.ReflectorSpacing, ...
+          antBaza.Exciter.Length, ...
+          antBaza.DirectorLength(:)', ...
+          antBaza.DirectorSpacing(:)' ];
+P.nVar = numel(x0);
+
+% Limitele de cautare, exprimate in fractiuni de lungime de unda,
+% corespunzatoare domeniilor uzuale din literatura de specialitate.
+% Formularea in raport cu lambda, iar nu ca abatere procentuala fata de
+% valorile initiale, asigura acoperirea intregului domeniu fizic rezonabil.
+lambda = physconst('LightSpeed') / P.fc;
+fprintf('  Lungimea de unda: %.4f m\n', lambda);
+
+lb = [0.45, 0.10, 0.40, repmat(0.38, 1, P.nDirect), ...
+                        repmat(0.15, 1, P.nDirect)] * lambda;
+ub = [0.55, 0.30, 0.50, repmat(0.48, 1, P.nDirect), ...
+                        repmat(0.45, 1, P.nDirect)] * lambda;
+
+% verificare: valorile initiale trebuie sa se afle in interiorul limitelor
+if any(x0 < lb) || any(x0 > ub)
+    warning('Valorile initiale depasesc limitele; se aplica trunchiere.');
+    x0 = min(max(x0, lb), ub);
+end
+
+etichete = [{'L_reflector','S_reflector','L_excitator'}, ...
+            arrayfun(@(k) sprintf('L_director_%d',k), 1:P.nDirect, ...
+                     'UniformOutput', false), ...
+            arrayfun(@(k) sprintf('S_director_%d',k), 1:P.nDirect, ...
+                     'UniformOutput', false)];
+
+fprintf('Valori initiale (m):\n');
+for k = 1:P.nVar
+    fprintf('  %-14s %.4f\n', etichete{k}, x0(k));
+end
+fprintf('\n');
+
+%% ================== 3. CONTORIZARE SI ISTORIC ==================
+global NR_EVAL ISTORIC
+NR_EVAL = 0;
+ISTORIC = [];              % [nr_evaluare, F, D, FB, S11max]
+
+%% ================== 4. VERIFICARE PRELIMINARA ==================
+fprintf('Se evalueaza antena de referinta...\n');
+tic;
+F0 = functieObiectiv(x0, P);
+t1 = toc;
+[Dr, FBr, Sr, azr, elr] = evalueazaAntena(construiesteAntena(x0,P), P);
+fprintf('  F = %.4f   (durata: %.1f s)\n', F0, t1);
+fprintf('  D = %.2f dBi la azimut %d grade, elevatie %d grade\n', Dr, azr, elr);
+fprintf('  FB = %.2f dB   S11max = %.2f dB\n', FBr, Sr);
+fprintf('  Durata estimata a optimizarii: %.1f minute\n\n', ...
+        P.maxEval*t1/60);
+
+%% ================== 5. OPTIMIZAREA ==================
+optiuni = optimoptions('surrogateopt', ...
+    'MaxFunctionEvaluations', P.maxEval, ...
+    'PlotFcn',               'optimplotfval', ...
+    'Display',               'iter', ...
+    'InitialPoints',         x0);
+
+fprintf('Se porneste optimizarea (%d evaluari)...\n', P.maxEval);
+cron = tic;
+
+[xOpt, fval, exitflag, output] = surrogateopt(@(x) functieObiectiv(x,P), ...
+                                              lb, ub, optiuni);
+
+durata = toc(cron);
+
+%% ================== 6. REZULTATE ==================
+antOpt = construiesteAntena(xOpt, P);
+[D, FB, S11max] = evalueazaAntena(antOpt, P);
+
+[D0, FB0, S110] = evalueazaAntena(construiesteAntena(x0,P), P);
+
+fprintf('\n==================================================\n');
+fprintf('  REZULTATELE OPTIMIZARII\n');
+fprintf('==================================================\n');
+fprintf('Durata:              %.1f minute\n', durata/60);
+fprintf('Evaluari consumate:  %d\n', NR_EVAL);
+fprintf('Durata / evaluare:   %.1f s\n\n', durata/NR_EVAL);
+
+fprintf('%-22s %10s %10s\n', 'Marime', 'Initial', 'Optimizat');
+fprintf('%-22s %10.2f %10.2f\n', 'Directivitate [dBi]', D0, D);
+fprintf('%-22s %10.2f %10.2f\n', 'Raport fata-spate [dB]', FB0, FB);
+fprintf('%-22s %10.2f %10.2f\n', 'S11 maxim [dB]', S110, S11max);
+
+fprintf('\nConstrangeri respectate:\n');
+fprintf('  D  > %4.1f dBi : %s\n', P.Dmin,   verdictText(D > P.Dmin));
+fprintf('  FB > %4.1f dB  : %s\n', P.FBmin,  verdictText(FB > P.FBmin));
+fprintf('  S11< %4.1f dB  : %s\n', P.S11max, verdictText(S11max < P.S11max));
+
+fprintf('\nDimensiuni optimizate (m):\n');
+for k = 1:P.nVar
+    fprintf('  %-14s %.4f   (initial %.4f, variatie %+.1f%%)\n', ...
+            etichete{k}, xOpt(k), x0(k), 100*(xOpt(k)-x0(k))/x0(k));
+end
+
+%% ================== 7. SALVARE ==================
+numeFisier = sprintf('surrogate_yagi_%s.mat', datestr(now,'yyyymmdd_HHMM'));
+save(numeFisier, 'xOpt','fval','exitflag','output','x0','lb','ub', ...
+                 'P','D','FB','S11max','durata','NR_EVAL','ISTORIC','etichete');
+fprintf('\nRezultate salvate in: %s\n', numeFisier);
+
+%% ================== 8. FIGURI ==================
+figure('Name','Geometria optimizata');
+show(antOpt);
+
+figure('Name','Diagrama de radiatie');
+pattern(antOpt, P.fc);
+
+figure('Name','Convergenta');
+plot(ISTORIC(:,1), cummin(ISTORIC(:,2)), 'LineWidth', 1.5);
+grid on;
+xlabel('Numar de analize electromagnetice');
+ylabel('Cea mai buna valoare a functiei obiectiv');
+title('Evolutia procesului de optimizare');
+
+figure('Name','Adaptare');
+s = sparameters(antOpt, linspace(0.95*P.fc, 1.05*P.fc, 41), P.Z0);
+rfplot(s); grid on;
+
+
+%% ============ FUNCTII AUXILIARE ============
+
+function ant = construiesteAntena(x, P)
+    ant = yagiUda;
+    ant.NumDirectors     = P.nDirect;
+    ant.Exciter          = P.excitator;
+    ant.Exciter.Length   = x(P.iLexc);
+    ant.ReflectorLength  = x(P.iLref);
+    ant.ReflectorSpacing = x(P.iSref);
+    ant.DirectorLength   = x(P.iLdir);
+    ant.DirectorSpacing  = x(P.iSdir);
+end
+
+function [D, FB, S11max, azMax, elMax] = evalueazaAntena(ant, P)
+    % Se determina maximul real al diagramei de radiatie, fara a presupune
+    % o directie anume. Orientarea obiectului yagiUda in sistemul de
+    % coordonate al mediului de simulare nu este cunoscuta apriori.
+    Dgrila = pattern(ant, P.fc, P.az, P.el);   % [numel(el) x numel(az)]
+
+    [D, idx]   = max(Dgrila(:));
+    [iel, iaz] = ind2sub(size(Dgrila), idx);
+    azMax = P.az(iaz);
+    elMax = P.el(iel);
+
+    % directia diametral opusa
+    azSpate = mod(azMax + 360, 360) - 180;
+    elSpate = -elMax;
+    Dspate  = pattern(ant, P.fc, azSpate, elSpate);
+
+    FB = D - Dspate;
+    % adaptarea pe banda de interes
+    s      = sparameters(ant, P.freqBanda, P.Z0);
+    S11    = 20*log10(abs(squeeze(rfparam(s,1,1))));
+    S11max = max(S11);
+end
+
+function F = functieObiectiv(x, P)
+    global NR_EVAL ISTORIC
+    NR_EVAL = NR_EVAL + 1;
+
+    try
+        ant = construiesteAntena(x, P);
+        [D, FB, S11max] = evalueazaAntena(ant, P);
+
+        % termenii de penalizare (zero cand constrangerea e respectata)
+        p = max(0, P.Dmin   - D)      ...
+          + max(0, P.FBmin  - FB)     ...
+          + max(0, S11max   - P.S11max);
+
+        F = -D + P.K * p;    % minimizare => directivitate maxima
+    catch
+        D = NaN; FB = NaN; S11max = NaN;
+        F = 1e6;             % solutie invalida
+    end
+
+    ISTORIC(end+1,:) = [NR_EVAL, F, D, FB, S11max];
+end
+
+function s = verdictText(cond)
+    if cond, s = 'DA'; else, s = 'NU'; end
+en
